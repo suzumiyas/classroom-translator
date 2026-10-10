@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101827">
+<title>课堂同传 · 英译中</title>
+<style>
+:root{color-scheme:dark;--bg:#101827;--panel:#182235;--muted:#aab6c8;--line:#344258;--accent:#8bc5ff;--good:#8ee0b1;--warn:#ffd38a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:#f5f7fb;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:env(safe-area-inset-top) 16px env(safe-area-inset-bottom);line-height:1.45}
+main{max-width:760px;margin:0 auto;padding:16px 0 28px}
+h1{font-size:25px;margin:8px 0 4px}.sub{color:var(--muted);font-size:14px;margin:0 0 18px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:15px;margin:12px 0}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+button,select{font:inherit;border-radius:11px;border:1px solid var(--line);padding:11px 13px;background:#243249;color:#fff}
+button{cursor:pointer}button.primary{background:#b7dcff;color:#102035;border-color:#b7dcff;font-weight:700}button:disabled{opacity:.45;cursor:not-allowed}
+.status{font-size:14px;color:var(--muted);margin-top:10px}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#8995a6;margin-right:7px}.dot.live{background:#65d99b;box-shadow:0 0 0 4px #65d99b22}
+label{font-size:13px;color:var(--muted);display:block;margin-bottom:6px}
+#liveEn{font-size:17px;color:#c5d0df;min-height:28px;overflow-wrap:anywhere}
+#liveZh{font-size:clamp(25px,6vw,38px);font-weight:650;line-height:1.5;min-height:70px;overflow-wrap:anywhere}
+.small{font-size:12px;color:var(--muted)}
+#entries{display:flex;flex-direction:column;gap:12px}
+.entry{padding:12px;border-radius:12px;background:#111b2a;border:1px solid #2d3a4e}
+.entry time{font-size:12px;color:var(--muted)}
+.entry .en{color:#b6c2d3;font-size:14px;margin-top:6px}
+.entry .zh{font-size:20px;margin-top:5px;overflow-wrap:anywhere}
+.warning{color:var(--warn);font-size:13px}
+footer{color:var(--muted);font-size:12px;margin-top:18px}
+a{color:var(--accent)}
+</style>
+</head>
+<body>
+<main>
+  <h1>课堂同传</h1>
+  <p class="sub">英语 → 简体中文 · 仅显示文字 · 不播放语音</p>
+
+  <section class="panel">
+    <div class="row">
+      <button id="start" class="primary">开始收听</button>
+      <button id="stop" disabled>停止</button>
+      <button id="clear">清空记录</button>
+    </div>
+    <div class="status"><span id="dot" class="dot"></span><span id="status">尚未开始</span></div>
+    <p id="notice" class="warning"></p>
+    <p class="small">识别语言：
+      <select id="accent" aria-label="英语识别口音">
+        <option value="en-US">英语（美国）</option>
+        <option value="en-GB">英语（英国）</option>
+        <option value="en-AU">英语（澳大利亚）</option>
+      </select>
+      &nbsp; 字幕大小：
+      <select id="size" aria-label="字幕大小">
+        <option value="large">大</option><option value="xlarge">特大</option>
+      </select>
+    </p>
+  </section>
+
+  <section class="panel">
+    <label>正在识别的英语</label>
+    <div id="liveEn">等待老师开始讲话……</div>
+    <hr style="border:0;border-top:1px solid var(--line);margin:13px 0">
+    <label>中文翻译</label>
+    <div id="liveZh">中文译文会显示在这里。</div>
+    <p class="small" id="translationStatus">翻译状态：待命</p>
+  </section>
+
+  <section class="panel">
+    <div class="row" style="justify-content:space-between">
+      <strong>课堂文字记录</strong>
+      <div class="row">
+        <button id="export">导出 TXT</button>
+        <button id="copy">复制全部</button>
+      </div>
+    </div>
+    <p class="small">记录保存在此浏览器的本地存储中；不会保存音频。刷新页面后文字仍会保留。</p>
+    <div id="entries"></div>
+    <p id="empty" class="small">还没有记录。</p>
+  </section>
+
+  <footer>
+    重要说明：这是一个免费服务原型。语音识别由浏览器提供，可能会把音频发送给浏览器/平台的识别服务；翻译请求会把识别出的英文发送给 MyMemory 翻译服务。请遵守课堂录音与隐私规定。免费服务可能限流、延迟或不可用。iPhone 浏览器对连续语音识别的支持因系统版本而异。
+  </footer>
+</main>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let recognition = null, listening = false, manuallyStopped = false, restartTimer = null;
+  let entries = [];
+  try { entries = JSON.parse(localStorage.getItem('class-translator-entries') || '[]'); } catch(e) { entries = []; }
+  let translationQueue = Promise.resolve();
+  const translatedCache = new Map();
+
+  function setStatus(text, live=listening) {
+    $('status').textContent = text;
+    $('dot').classList.toggle('live', live);
+    $('start').disabled = listening;
+    $('stop').disabled = !listening;
+  }
+  function persist() {
+    try { localStorage.setItem('class-translator-entries', JSON.stringify(entries)); }
+    catch(e) { $('notice').textContent = '本地存储空间不足，部分记录可能无法保存。'; }
+  }
+  function escapeText(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  function renderEntries() {
+    $('entries').innerHTML = entries.slice().reverse().map(e =>
+      `<article class="entry"><time>${escapeText(e.time)}</time><div class="en">${escapeText(e.en)}</div><div class="zh">${escapeText(e.zh || '（翻译失败，可稍后重试）')}</div></article>`
+    ).join('');
+    $('empty').style.display = entries.length ? 'none' : 'block';
+  }
+  function addEntry(en, zh) {
+    entries.push({time:new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}), en, zh});
+    if(entries.length > 500) entries = entries.slice(-500);
+    persist(); renderEntries();
+  }
+  async function translate(text) {
+    const key = text.trim();
+    if (!key) return '';
+    if (translatedCache.has(key)) return translatedCache.get(key);
+    const url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(key) + '&langpair=en|zh-CN';
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('翻译服务暂时不可用');
+    const data = await res.json();
+    const result = data && data.responseData && data.responseData.translatedText;
+    if (!result) throw new Error('没有获得译文');
+    translatedCache.set(key, result);
+    return result;
+  }
+  function queueTranslation(text) {
+    translationQueue = translationQueue.then(async () => {
+      $('translationStatus').textContent = '翻译状态：翻译中……';
+      try {
+        const zh = await translate(text);
+        $('liveEn').textContent = text;
+        $('liveZh').textContent = zh;
+        $('translationStatus').textContent = '翻译状态：完成';
+        addEntry(text, zh);
+      } catch(err) {
+        $('liveEn').textContent = text;
+        $('liveZh').textContent = '翻译暂时失败，请稍后重试。';
+        $('translationStatus').textContent = '翻译状态：服务不可用或达到免费额度限制';
+        addEntry(text, '');
+      }
+    }).catch(() => {});
+  }
+  function start() {
+    $('notice').textContent = '';
+    if (!SpeechRecognition) {
+      $('notice').textContent = '当前浏览器没有提供语音识别接口。请尝试更新 iOS 后使用 Safari，或改用支持语音识别的浏览器；若仍不支持，此网页无法直接收听。';
+      return;
+    }
+    if (listening) return;
+    manuallyStopped = false;
+    recognition = new SpeechRecognition();
+    recognition.lang = $('accent').value;
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    recognition.onstart = () => { listening = true; setStatus('正在收听老师的英语……'); };
+    recognition.onresult = event => {
+      let interim = '', finals = [];
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        const transcript = result[0].transcript.trim();
+        if (result.isFinal && transcript) finals.push(transcript);
+        else if (transcript) interim += transcript + ' ';
+      }
+      if (interim) $('liveEn').textContent = interim.trim();
+      finals.forEach(queueTranslation);
+    };
+    recognition.onerror = event => {
+      const messages = {
+        'not-allowed':'麦克风权限被拒绝。请在 Safari 网站设置中允许麦克风。',
+        'service-not-allowed':'浏览器语音识别服务不可用。',
+        'network':'网络错误；请检查网络后重试。',
+        'no-speech':'暂时没有识别到语音。请确认老师声音能被麦克风收录。'
+      };
+      $('notice').textContent = messages[event.error] || ('语音识别提示：' + event.error);
+    };
+    recognition.onend = () => {
+      if (listening && !manuallyStopped) {
+        clearTimeout(restartTimer);
+        restartTimer = setTimeout(() => {
+          try { recognition.start(); } catch(e) {}
+        }, 350);
+      } else {
+        listening = false; setStatus('已停止收听', false);
+      }
+    };
+    try { recognition.start(); }
+    catch(e) { $('notice').textContent = '无法启动麦克风：' + e.message; }
+  }
+  function stop() {
+    manuallyStopped = true; listening = false;
+    clearTimeout(restartTimer);
+    if (recognition) { try { recognition.stop(); } catch(e) {} }
+    setStatus('正在停止……', false);
+  }
+  $('start').addEventListener('click', start);
+  $('stop').addEventListener('click', stop);
+  $('clear').addEventListener('click', () => {
+    if (confirm('确定清空所有课堂文字记录吗？此操作不可撤销。')) {
+      entries = []; persist(); renderEntries();
+      $('liveEn').textContent = '等待老师开始讲话……';
+      $('liveZh').textContent = '中文译文会显示在这里。';
+    }
+  });
+  $('export').addEventListener('click', () => {
+    const text = entries.map(e => `[${e.time}]\n英文：${e.en}\n中文：${e.zh || '（翻译失败）'}`).join('\n\n');
+    const blob = new Blob([text || '暂无课堂记录'], {type:'text/plain;charset=utf-8'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = '课堂同传记录.txt'; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  $('copy').addEventListener('click', async () => {
+    const text = entries.map(e => `[${e.time}] ${e.en}\n${e.zh || '（翻译失败）'}`).join('\n\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      $('translationStatus').textContent = '翻译状态：记录已复制';
+    } catch(e) {
+      $('translationStatus').textContent = '复制失败，请使用“导出 TXT”。';
+    }
+  });
+  $('size').addEventListener('change', () => {
+    $('liveZh').style.fontSize = $('size').value === 'xlarge' ? 'clamp(32px,8vw,46px)' : 'clamp(25px,6vw,38px)';
+  });
+  renderEntries();
+  if (!SpeechRecognition) $('notice').textContent = '提示：当前浏览器可能不支持内置语音识别。请先部署到 HTTPS 地址后测试；如果仍不支持，需要更换语音识别方案。';
+})();
+</script>
+</body>
+</html>
